@@ -44,7 +44,7 @@ class FakeAgent:
         return []
 
     def answer(self, question, history=None, selected=None,
-               max_tokens=None, compact=None, memory=None):
+               max_tokens=None, compact=None, memory=None, profile=None):
         self.sent.append(list(history or []))
         return {"ok": True, "html": "", "text": "ok", "answers": [],
                 "meta": "", "usage": {"input": 1, "output": 1,
@@ -59,6 +59,8 @@ def main():
     tmpdir = tempfile.mkdtemp()
     ss_mod.config.SESSION_DIR = tmpdir
     ss_mod.config.SESSION_FILE = os.path.join(tmpdir, "session.json")
+    # Профили тоже во временную папку, чтобы не трогать рабочие файлы.
+    ss_mod.config.PROFILES_FILE = os.path.join(tmpdir, "profiles.json")
     # Явно включаем сжатие: в проекте по умолчанию keep = 0 (сжатие выкл.).
     ss_mod.config.COMPACT_KEEP = 10
 
