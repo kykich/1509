@@ -32,6 +32,10 @@ JSON-API:
                               (действия: set/delete/replace/clear, GET-снимок)
     POST /api/branches      - {action:"create"|"switch"|"delete"|"rename", …}
                               -> ветки (rename: {index, name})
+    GET  /api/profiles      - список профилей (персон) + активный
+    POST /api/profiles      - {action:"create"|"switch"|"update"|"delete", …}
+                              -> профили (персоны): character (характер/тон)
+                              и style (характер ответов) задаются при создании
 """
 import json
 import mimetypes
@@ -131,6 +135,14 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 "facts": self.session.get_facts(),
                 "branches": self.session.branches_state(),
                 "memory": self.session.memory_state(),
+                "profiles": self.session.profiles_state(),
+            })
+        if path == "/api/profiles":
+            state = self.session.profiles_state()
+            return self._send_json(200, {
+                "ok": True,
+                "profiles": state["profiles"],
+                "active": state["active"],
             })
         self._send_json(404, {"ok": False, "error": "Not Found"})
 
@@ -154,6 +166,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return self._handle_memory()
         if urllib.parse.urlparse(self.path).path == "/api/branches":
             return self._handle_branches()
+        if urllib.parse.urlparse(self.path).path == "/api/profiles":
+            return self._handle_profiles()
         self._send_json(404, {"ok": False, "error": "Not Found"})
 
     # ---------------- Статика ----------------
@@ -260,10 +274,16 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         else:
             print("[MEMORY] память пуста — в запрос не добавляется", flush=True)
 
+        # Профиль (персона): характер и характер ответов активного профиля
+        # подставляются в системный промпт каждой модели (тон + формат/длина).
+        pid, pname, pchar, pstyle = self.session.active_profile_attrs()
+        profile = {"name": pname, "character": pchar, "style": pstyle}
+
         result = self.agent.answer(question, history, selected,
                                    max_tokens=max_tokens,
                                    compact=compact,
-                                   memory=memory)
+                                   memory=memory,
+                                   profile=profile)
         if result.get("ok"):
             # По одному ходу на ответ модели с уже готовой разметкой
             self.session.append_turn(question, {
@@ -518,6 +538,63 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             "ok": True,
             "branches": state,
             "messages": self.session.snapshot(),
+        })
+
+    def _handle_profiles(self):
+        """Управление ПРОФИЛЯМИ (персонами).
+
+        Профиль — именованная персона со СВОЕЙ памятью (рабочая +
+        долговременная), своим диалогом и настройками. Атрибуты character
+        (характер — тон общения) и style (характер ответов — формат/длина)
+        задаются ПРИ СОЗДАНИИ и подставляются в системный промпт каждой
+        модели. Переключение профиля заменяет активную память и диалог.
+
+        Ожидаемые поля: action = "create" | "switch" | "update" | "delete";
+        id (для switch/update/delete); name, character, style (для
+        create/update).
+        """
+        data = self._read_json_body()
+        if not data:
+            return self._send_json(400, {"ok": False, "error": "Bad JSON."})
+        action = str(data.get("action", "list")).strip().lower()
+        try:
+            if action == "create":
+                state = self.session.create_profile(
+                    data.get("name"),
+                    character=data.get("character"),
+                    style=data.get("style"),
+                    activate=bool(data.get("activate", True)))
+            elif action == "switch":
+                state = self.session.switch_profile(data.get("id"))
+            elif action == "update":
+                state = self.session.update_profile(
+                    data.get("id"),
+                    name=data.get("name"),
+                    character=data.get("character"),
+                    style=data.get("style"))
+            elif action == "delete":
+                state = self.session.delete_profile(data.get("id"))
+            elif action in ("list", "state", ""):
+                state = self.session.profiles_state()
+            else:
+                return self._send_json(400, {
+                    "ok": False,
+                    "error": "Неизвестное действие с профилями (action).",
+                })
+        except ValueError as exc:
+            return self._send_json(400, {"ok": False, "error": str(exc)})
+        # После переключения/удаления активным может стать другой профиль —
+        # возвращаем актуальные память и диалог, чтобы интерфейс обновился.
+        return self._send_json(200, {
+            "ok": True,
+            "profiles": state.get("profiles", []),
+            "active": state.get("active"),
+            "messages": self.session.snapshot(),
+            "memory": self.session.memory_state(),
+            "branches": self.session.branches_state(),
+            "compact": self.session.get_compact(),
+            "strategy": self.session.get_strategy(),
+            "context": self.session.context_stats(),
         })
 
 

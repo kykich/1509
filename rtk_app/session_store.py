@@ -63,6 +63,11 @@ class SessionStore:
     """Потокобезопасное хранилище одного активного диалога в JSON-файле."""
 
     def __init__(self, path=None):
+        # path — путь к ФАЙЛУ СЕССИИ (легаси-формат). Если задан явно (напр.
+        # во временном файле тестов), профили хранятся в ТОМ ЖЕ файле — так
+        # каждый тест изолирован. Если path не задан (продакшн) — профили
+        # идут в config.PROFILES_FILE, а легаси-сессия — в config.SESSION_FILE.
+        explicit_path = path is not None
         self.path = path or config.SESSION_FILE
         self.lock = threading.RLock()
         self.messages = []
@@ -86,6 +91,13 @@ class SessionStore:
         self.memory_use = {"working": 0, "longterm": 0}
         # Сколько РАЗ (за сколько обменов) каждый вид памяти был задействован.
         self.memory_use_count = {"working": 0, "longterm": 0}
+        # ПРОФИЛИ (персоны). self.profiles — список dict-профилей (источник
+        # истины), self.active_profile — идентификатор активного профиля.
+        # Все поля self.messages/memory_*/… — это СОСТОЯНИЕ АКТИВНОГО профиля
+        # (снимок); при переключении профиля они заменяются.
+        self.profiles = []
+        self.active_profile = None
+        self.profiles_path = self.path if explicit_path else config.PROFILES_FILE
         self.load()
 
     @staticmethod
@@ -97,9 +109,232 @@ class SessionStore:
             "upto": 0,
         }
 
+    # ==================================================================
+    # ПРОФИЛИ (персоны)
+    # ==================================================================
+    # Профиль — именованный набор состояния: своя память (рабочая +
+    # долговременная), свой диалог (messages/ветки), настройки сжатия и
+    # стратегии, а также ХАРАКТЕР (тон) и ХАРАКТЕР ОТВЕТОВ (формат/длина),
+    # задаваемые при создании. self.profiles — источник истины; поля
+    # self.messages/memory_*/… отражают ТЕКУЩИЙ (активный) профиль.
+
+    @staticmethod
+    def _new_profile_dict(pid, name, character="", style=""):
+        """Создаёт словарь нового пустого профиля."""
+        return {
+            "id": str(pid),
+            "name": str(name or "Профиль")[: int(config.PROFILE_NAME_CAP)],
+            "character": str(character or "")[: int(config.PROFILE_ATTR_CAP)],
+            "style": str(style or "")[: int(config.PROFILE_ATTR_CAP)],
+            # Память профиля (изолирована от других профилей).
+            "memory_working": {},
+            "memory_longterm": {},
+            # Диалог и ветки профиля.
+            "messages": [],
+            "branches": [{"name": "main", "messages": []}],
+            "active_branch": 0,
+            # Настройки контекста профиля.
+            "compact": {
+                "enabled": bool(config.COMPACT_ENABLED),
+                "keep": config.COMPACT_KEEP,
+                "summary": "",
+                "upto": 0,
+            },
+            "strategy": config.STRATEGY,
+            "window": int(config.STRATEGY_WINDOW),
+            # Счётчики использования памяти профиля.
+            "memory_use": {"working": 0, "longterm": 0},
+            "memory_use_count": {"working": 0, "longterm": 0},
+        }
+
+    def _capture_locked(self):
+        """Копирует текущее состояние (self.*) в активный профиль (в список)."""
+        if not self.active_profile:
+            return
+        for p in self.profiles:
+            if p["id"] == self.active_profile:
+                p["memory_working"] = dict(self.memory_working)
+                p["memory_longterm"] = dict(self.memory_longterm)
+                p["messages"] = list(self.messages)
+                p["branches"] = [{"name": b["name"],
+                                  "messages": list(b["messages"])}
+                                 for b in self.branches]
+                p["active_branch"] = self.active_branch
+                p["compact"] = dict(self.compact)
+                p["strategy"] = self.strategy
+                p["window"] = self.window
+                p["memory_use"] = dict(self.memory_use)
+                p["memory_use_count"] = dict(self.memory_use_count)
+                return
+
+    def _apply_locked(self, profile):
+        """Загружает состояние профиля в текущие поля self.*."""
+        self.active_profile = profile["id"]
+        self.memory_working = dict(profile.get("memory_working") or {})
+        self.memory_longterm = dict(profile.get("memory_longterm") or {})
+        self.messages = list(profile.get("messages") or [])
+        branches = profile.get("branches")
+        if isinstance(branches, list) and branches:
+            self.branches = [{"name": str(b.get("name", "branch")),
+                              "messages": list(b.get("messages") or [])}
+                             for b in branches]
+        else:
+            self.branches = [{"name": "main", "messages": list(self.messages)}]
+        try:
+            ab = int(profile.get("active_branch", 0))
+        except (TypeError, ValueError):
+            ab = 0
+        self.active_branch = ab if 0 <= ab < len(self.branches) else 0
+        comp = profile.get("compact")
+        self.compact = dict(comp) if isinstance(comp, dict) \
+            else self._default_compact()
+        strat = profile.get("strategy")
+        self.strategy = strat if strat in VALID_STRATEGIES else config.STRATEGY
+        try:
+            self.window = max(0, int(profile.get("window",
+                                                 config.STRATEGY_WINDOW)))
+        except (TypeError, ValueError):
+            self.window = int(config.STRATEGY_WINDOW)
+        mused = profile.get("memory_use")
+        self.memory_use = {"working": int((mused or {}).get("working", 0) or 0),
+                           "longterm": int((mused or {}).get("longterm", 0) or 0)}
+        mcount = profile.get("memory_use_count")
+        self.memory_use_count = {
+            "working": int((mcount or {}).get("working", 0) or 0),
+            "longterm": int((mcount or {}).get("longterm", 0) or 0)}
+
+    def _ensure_profile_locked(self):
+        """Гарантирует наличие хотя бы одного профиля и активной ссылки."""
+        if not self.profiles:
+            self.profiles = [self._new_profile_dict("default", "Профиль 1",
+                                                    "дружелюбный", "обычные")]
+        ids = [p["id"] for p in self.profiles]
+        if self.active_profile not in ids:
+            self.active_profile = self.profiles[0]["id"]
+
+    def _profile_by_id_locked(self, pid):
+        for p in self.profiles:
+            if p["id"] == pid:
+                return p
+        return None
+
+    def profiles_state(self):
+        """Снимок профилей для интерфейса.
+
+        Возвращает dict:
+          profiles — список {id, name, character, style, active, size};
+          active   — id активного профиля.
+        """
+        with self.lock:
+            self._capture_locked()
+            out = []
+            for p in self.profiles:
+                out.append({
+                    "id": p["id"],
+                    "name": p["name"],
+                    "character": p.get("character", ""),
+                    "style": p.get("style", ""),
+                    "active": p["id"] == self.active_profile,
+                    "size": len(p.get("messages") or []),
+                })
+            return {"profiles": out, "active": self.active_profile}
+
+    def create_profile(self, name, character="", style="", activate=True):
+        """Создаёт новый профиль (со своей пустой памятью) и сохраняет.
+
+        name, character, style задаются при создании. Если activate=True —
+        новый профиль становится активным (память переключается на него).
+        """
+        with self.lock:
+            self._ensure_profile_locked()
+            name = str(name or "").strip()
+            if not name:
+                raise ValueError("Пустое имя профиля.")
+            if len(self.profiles) >= int(config.PROFILE_MAX):
+                raise ValueError("Достигнут предел числа профилей (%d)."
+                                 % int(config.PROFILE_MAX))
+            # Генерируем уникальный id.
+            existing = {p["id"] for p in self.profiles}
+            n = len(self.profiles) + 1
+            pid = "p%d" % n
+            while pid in existing:
+                n += 1
+                pid = "p%d" % n
+            prof = self._new_profile_dict(pid, name, character, style)
+            # Новый профиль наследует текущую стратегию/сжатие (но не память).
+            prof["strategy"] = self.strategy
+            prof["window"] = self.window
+            self.profiles.append(prof)
+            if activate:
+                self._capture_locked()
+                self._apply_locked(prof)
+            self._save_locked()
+            return self.profiles_state()
+
+    def update_profile(self, pid, name=None, character=None, style=None):
+        """Обновляет имя/характер/стиль профиля (память не трогает)."""
+        with self.lock:
+            p = self._profile_by_id_locked(pid)
+            if p is None:
+                raise ValueError("Профиль не найден: %r" % (pid,))
+            if name is not None:
+                nm = str(name).strip()
+                if not nm:
+                    raise ValueError("Пустое имя профиля.")
+                p["name"] = nm[: int(config.PROFILE_NAME_CAP)]
+            if character is not None:
+                p["character"] = str(character)[: int(config.PROFILE_ATTR_CAP)]
+            if style is not None:
+                p["style"] = str(style)[: int(config.PROFILE_ATTR_CAP)]
+            self._save_locked()
+            return self.profiles_state()
+
+    def delete_profile(self, pid):
+        """Удаляет профиль (нельзя удалить последний)."""
+        with self.lock:
+            self._ensure_profile_locked()
+            if len(self.profiles) <= 1:
+                raise ValueError("Нельзя удалить последний профиль.")
+            p = self._profile_by_id_locked(pid)
+            if p is None:
+                return self.profiles_state()
+            self.profiles = [x for x in self.profiles if x["id"] != pid]
+            if self.active_profile == pid:
+                # Переключаемся на первый оставшийся профиль.
+                self._apply_locked(self.profiles[0])
+            self._save_locked()
+            return self.profiles_state()
+
+    def switch_profile(self, pid):
+        """Переключает активный профиль: заменяет память и диалог."""
+        with self.lock:
+            self._ensure_profile_locked()
+            p = self._profile_by_id_locked(pid)
+            if p is None:
+                raise ValueError("Профиль не найден: %r" % (pid,))
+            self._capture_locked()          # сохраняем текущий профиль
+            self._apply_locked(p)           # загружаем выбранный
+            self._save_locked()
+            return self.profiles_state()
+
+    def active_profile_attrs(self):
+        """Возвращает (id, name, character, style) активного профиля."""
+        with self.lock:
+            self._ensure_profile_locked()
+            p = self._profile_by_id_locked(self.active_profile)
+            if p is None:
+                return (None, "", "", "")
+            return (p["id"], p["name"], p.get("character", ""),
+                    p.get("style", ""))
+
     # ---- чтение ----
     def load(self):
-        """Читает сохранённую историю из файла (None/нет файла -> пустая)."""
+        """Читает сохранённые профили и сессию из файлов.
+
+        Основной источник — profiles.json (список профилей + активный).
+        Если его нет, но есть старый session.json — мигрируем: создаём один
+        профиль «Профиль 1», перенося в него всю сохранённую память/диалог.
+        """
         with self.lock:
             self.messages = []
             self.compact = self._default_compact()
@@ -111,9 +346,120 @@ class SessionStore:
             self.memory_longterm = {}
             self.memory_use = {"working": 0, "longterm": 0}
             self.memory_use_count = {"working": 0, "longterm": 0}
-            if not self.path or not os.path.isfile(self.path):
+            # Сначала пробуем загрузить профили.
+            if self._load_profiles_locked():
                 return
+            # Профилей нет — читаем старую одиночную сессию (если есть) и
+            # переносим её содержимое в один профиль.
+            if self.path and os.path.isfile(self.path):
+                self._load_legacy_session_locked()
+            # Гарантируем наличие хотя бы одного профиля и запоминаем его
+            # как активный источник состояния.
+            legacy_attrs = self._legacy_profile_attrs
+            self.profiles = [self._new_profile_dict(
+                "default",
+                legacy_attrs.get("name", "Профиль 1"),
+                legacy_attrs.get("character", "дружелюбный"),
+                legacy_attrs.get("style", "обычные"))]
+            self.active_profile = "default"
+            # Переносим загруженное (из старой сессии) в профиль.
+            self._capture_locked()
+
+    def _load_profiles_locked(self):
+        """Загружает profiles.json в self.profiles и активирует сохранённый.
+
+        Возвращает True, если файл существует и успешно прочитан.
+        """
+        self._legacy_profile_attrs = {}
+        if not self.profiles_path or not os.path.isfile(self.profiles_path):
+            return False
+        try:
+            with open(self.profiles_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return False
+        profiles = data.get("profiles") if isinstance(data, dict) else None
+        if not isinstance(profiles, list) or not profiles:
+            return False
+        clean = []
+        for p in profiles:
+            if not isinstance(p, dict):
+                continue
+            pid = str(p.get("id") or "").strip()
+            if not pid:
+                continue
+            prof = self._new_profile_dict(
+                pid, p.get("name", "Профиль"),
+                p.get("character", ""), p.get("style", ""))
+            # Память.
+            mw = p.get("memory_working")
+            if isinstance(mw, dict):
+                prof["memory_working"] = {str(k): str(v) for k, v in mw.items()}
+            ml = p.get("memory_longterm")
+            if isinstance(ml, dict):
+                prof["memory_longterm"] = {str(k): str(v) for k, v in ml.items()}
+            # Диалог.
+            msgs = p.get("messages")
+            if isinstance(msgs, list):
+                prof["messages"] = [m for m in msgs
+                                    if isinstance(m, dict)
+                                    and m.get("role") in ("user", "assistant")]
+            br = p.get("branches")
+            if isinstance(br, list) and br:
+                prof["branches"] = [
+                    {"name": str(b.get("name", "branch")),
+                     "messages": [m for m in (b.get("messages") or [])
+                                  if isinstance(m, dict)
+                                  and m.get("role") in ("user", "assistant")]}
+                    for b in br if isinstance(b, dict)]
             try:
+                prof["active_branch"] = int(p.get("active_branch", 0))
+            except (TypeError, ValueError):
+                prof["active_branch"] = 0
+            # Настройки.
+            comp = p.get("compact")
+            if isinstance(comp, dict):
+                prof["compact"].update({
+                    "enabled": bool(comp.get("enabled",
+                                             config.COMPACT_ENABLED)),
+                    "keep": int(comp.get("keep", config.COMPACT_KEEP)),
+                    "summary": str(comp.get("summary", "")),
+                    "upto": int(comp.get("upto", 0)),
+                })
+            strat = p.get("strategy")
+            if strat in VALID_STRATEGIES:
+                prof["strategy"] = strat
+            try:
+                prof["window"] = max(0, int(p.get("window",
+                                                  config.STRATEGY_WINDOW)))
+            except (TypeError, ValueError):
+                pass
+            mu = p.get("memory_use")
+            if isinstance(mu, dict):
+                prof["memory_use"] = {
+                    "working": int(mu.get("working", 0) or 0),
+                    "longterm": int(mu.get("longterm", 0) or 0)}
+            mc = p.get("memory_use_count")
+            if isinstance(mc, dict):
+                prof["memory_use_count"] = {
+                    "working": int(mc.get("working", 0) or 0),
+                    "longterm": int(mc.get("longterm", 0) or 0)}
+            clean.append(prof)
+        if not clean:
+            return False
+        self.profiles = clean
+        active = data.get("active")
+        ids = [p["id"] for p in self.profiles]
+        self.active_profile = active if active in ids else self.profiles[0]["id"]
+        # Загружаем состояние активного профиля в self.*.
+        self._apply_locked(self._profile_by_id_locked(self.active_profile))
+        return True
+
+    def _load_legacy_session_locked(self):
+        """Читает старую единичную session.json (миграция в профиль)."""
+        self._legacy_profile_attrs = {}
+        try:
+            for _once in (0,):
                 with open(self.path, encoding="utf-8") as fh:
                     data = json.load(fh)
                 msgs = data.get("messages") if isinstance(data, dict) else None
@@ -216,9 +562,9 @@ class SessionStore:
                 # При активной стратегии Branch сообщения берём из активной ветки.
                 if self.strategy == "branch":
                     self.messages = list(self.branches[self.active_branch]["messages"])
-            except Exception:
-                # Битый файл не должен ронять сервер — стартуем с чистой историей
-                self.messages = []
+        except Exception:
+            # Битый файл не должен ронять сервер — стартуем с чистой историей
+            self.messages = []
 
     def snapshot(self):
         """Копия списка сообщений текущей сессии (активной ветки)."""
@@ -265,36 +611,86 @@ class SessionStore:
             self._save_locked()
 
     def _save_locked(self):
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        # При стратегии Branch синхронизируем активную ветку с текущей историей.
-        if self.strategy == "branch":
+        # Синхронизируем активную ветку с текущей историей.
+        if self.strategy == "branch" and \
+                0 <= self.active_branch < len(self.branches):
             self.branches[self.active_branch]["messages"] = list(self.messages)
+        # Переносим текущее состояние в активный профиль и сохраняем ВСЕ
+        # профили в profiles.json — это основной источник состояния.
+        self._ensure_profile_locked()
+        self._capture_locked()
+        self._save_profiles_locked()
+
+    def _save_profiles_locked(self):
+        """Записывает profiles.json (все профили + активный).
+
+        ДОПОЛНИТЕЛЬНО, для обратной совместимости и удобства отладки, в файл
+        кладутся «плоские» поля АКТИВНОГО профиля (messages, compact, memory,
+        strategy, branches, …): так старые инструменты/тесты, читающие
+        session.json напрямую, продолжают видеть состояние активного профиля.
+        """
+        path = self.profiles_path or config.PROFILES_FILE
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = {
             "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "active": self.active_profile,
+            "profiles": self.profiles,
+            # Плоские поля активного профиля (совместимость со старым форматом).
             "count": len(self.messages),
-            "messages": self.messages,
-            "compact": self.compact,
+            "messages": list(self.messages),
+            "compact": dict(self.compact),
             "strategy": self.strategy,
             "window": self.window,
             "facts": self.get_facts(),
-            "branches": self.branches,
+            "branches": [{"name": b["name"], "messages": list(b["messages"])}
+                         for b in self.branches],
             "active_branch": self.active_branch,
-            # Память агента: два ЯВНО заполняемых слоя (типы хранятся отдельно).
-            "memory": {
-                "working": self.memory_working,
-                "longterm": self.memory_longterm,
-            },
-            # Счётчики использования данных памяти (сумма за сессию).
+            "memory": {"working": dict(self.memory_working),
+                       "longterm": dict(self.memory_longterm)},
             "memory_use": dict(self.memory_use),
-            # Сколько РАЗ вид памяти был задействован (за сессию).
             "memory_use_count": dict(self.memory_use_count),
         }
-        tmp = self.path + ".tmp"
+        tmp = path + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=1)
-            os.replace(tmp, self.path)
+            os.replace(tmp, path)
         except Exception as exc:                    # не роняем запрос из-за диска
+            print("[session] не удалось сохранить профили: %s" % exc, flush=True)
+        # ДОПОЛНИТЕЛЬНО пишем ЛЕГАСИ-файл сессии (self.path), если он
+        # отличается от файла профилей: старые инструменты/тесты, читающие
+        # session.json напрямую, продолжают видеть состояние активного
+        # профиля в привычном формате.
+        if self.path and os.path.abspath(self.path) != os.path.abspath(path):
+            self._save_legacy_locked()
+
+    def _save_legacy_locked(self):
+        """Пишет легаси-формат session.json (плоские поля активного профиля)."""
+        path = self.path
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            data = {
+                "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "count": len(self.messages),
+                "messages": list(self.messages),
+                "compact": dict(self.compact),
+                "strategy": self.strategy,
+                "window": self.window,
+                "facts": self.get_facts(),
+                "branches": [{"name": b["name"],
+                              "messages": list(b["messages"])}
+                             for b in self.branches],
+                "active_branch": self.active_branch,
+                "memory": {"working": dict(self.memory_working),
+                           "longterm": dict(self.memory_longterm)},
+                "memory_use": dict(self.memory_use),
+                "memory_use_count": dict(self.memory_use_count),
+            }
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+        except Exception as exc:
             print("[session] не удалось сохранить сессию: %s" % exc, flush=True)
 
     # ---- сброс ----

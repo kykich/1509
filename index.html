@@ -42,6 +42,26 @@
             </label>
             <span class="side-note">Sliding/Facts: сколько последних сообщений брать (0 — вся история)</span>
 
+            <!-- Профили (персоны): именованные наборы состояния — своя память,
+                 свой диалог и своя манера общения. У профиля задаются ХАРАКТЕР
+                 (тон) и ХАРАКТЕР ОТВЕТОВ (формат/длина) — они подставляются в
+                 системный промпт каждой модели. Переключение профиля заменяет
+                 активную память и диалог. -->
+            <div class="side-title side-sub">Профили (персоны)</div>
+            <div id="profiles-box" class="profiles-box">
+                <div class="profiles-empty">профилей пока нет</div>
+            </div>
+            <div class="profiles-actions">
+                <input type="text" id="profile-name" class="gen-input profile-input"
+                       placeholder="имя" maxlength="40">
+                <input type="text" id="profile-character" class="gen-input profile-input"
+                       placeholder="характер (тон)" maxlength="200">
+                <input type="text" id="profile-style" class="gen-input profile-input"
+                       placeholder="характер ответов (формат)" maxlength="200">
+                <button id="profile-create" type="button" class="btn-side primary">Создать профиль</button>
+            </div>
+            <span class="side-note">характер задаёт тон, характер ответов — формат и длину</span>
+
             <!-- Summary: автоматическое сжатие истории (без кнопки).
                  Summary генерируется само после накопления указанного
                  числа несжатых сообщений. -->

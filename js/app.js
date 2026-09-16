@@ -909,6 +909,154 @@
         document.getElementById("mem-longterm-clear"));
 
     // ------------------------------------------------------------------
+    // ПРОФИЛИ (персоны)
+    // ------------------------------------------------------------------
+    // Профиль — именованный набор состояния: своя память, свой диалог,
+    // свои настройки и своя МАНЕРА ОБЩЕНИЯ. У профиля два атрибута:
+    //   character — ХАРАКТЕР (тон общения);
+    //   style     — ХАРАКТЕР ОТВЕТОВ (формат и длина).
+    // Оба подставляются в системный промпт каждой модели. Переключение
+    // профиля заменяет активную память и диалог (сервер возвращает их снимок).
+    var profilesBox = document.getElementById("profiles-box");
+    var profileNameInp = document.getElementById("profile-name");
+    var profileCharInp = document.getElementById("profile-character");
+    var profileStyleInp = document.getElementById("profile-style");
+    var profileCreateBtn = document.getElementById("profile-create");
+    // Текущий список профилей и id активного (снимок сервера).
+    var profilesState = { profiles: [], active: null };
+
+    // Рисует строки профилей: имя, характер/стиль и кнопки действий.
+    function renderProfiles(state) {
+        if (!profilesBox) return;
+        if (state && Array.isArray(state.profiles)) profilesState = state;
+        var list = profilesState.profiles || [];
+        profilesBox.innerHTML = "";
+        if (!list.length) {
+            var empty = document.createElement("div");
+            empty.className = "profiles-empty";
+            empty.textContent = "профилей пока нет";
+            profilesBox.appendChild(empty);
+            return;
+        }
+        list.forEach(function (p) {
+            var row = document.createElement("div");
+            row.className = "profile-row" + (p.active ? " active" : "");
+            row.title = "Клик — переключиться на этот профиль";
+
+            var name = document.createElement("span");
+            name.className = "p-name";
+            name.textContent = p.name || "(без имени)";
+            row.appendChild(name);
+
+            var meta = document.createElement("span");
+            meta.className = "p-meta";
+            var bits = [];
+            if (p.character) bits.push(p.character);
+            if (p.style) bits.push(p.style);
+            meta.textContent = bits.join(" · ") || "без характера";
+            row.appendChild(meta);
+
+            var size = document.createElement("span");
+            size.className = "p-size";
+            size.textContent = (p.size || 0) + " сообщ.";
+            row.appendChild(size);
+
+            // Кнопка редактирования (карандаш) — просим новые атрибуты.
+            var ren = document.createElement("button");
+            ren.type = "button"; ren.className = "p-ren"; ren.textContent = "\u270e";
+            ren.title = "Изменить имя/характер/стиль";
+            ren.addEventListener("click", function (e) {
+                e.stopPropagation();
+                var newName = window.prompt("Имя профиля:", p.name || "");
+                if (newName === null) return;
+                var newChar = window.prompt("Характер (тон):", p.character || "");
+                if (newChar === null) return;
+                var newStyle = window.prompt("Характер ответов (формат/длина):",
+                                             p.style || "");
+                if (newStyle === null) return;
+                profileAction({ action: "update", id: p.id, name: newName,
+                                character: newChar, style: newStyle });
+            });
+            row.appendChild(ren);
+
+            // Удаление доступно, только если профилей больше одного.
+            if (list.length > 1) {
+                var del = document.createElement("button");
+                del.type = "button"; del.className = "p-del"; del.textContent = "\u00d7";
+                del.title = "Удалить профиль";
+                del.addEventListener("click", function (e) {
+                    e.stopPropagation();
+                    if (!window.confirm("Удалить профиль «" + (p.name || "") +
+                                        "» вместе с его памятью и диалогом?")) return;
+                    profileAction({ action: "delete", id: p.id });
+                });
+                row.appendChild(del);
+            }
+
+            row.addEventListener("click", function () {
+                if (p.active) return;
+                profileAction({ action: "switch", id: p.id });
+            });
+            profilesBox.appendChild(row);
+        });
+    }
+
+    // Применяет снимок, пришедший от сервера после действий с профилями:
+    // заменяет диалог, память и настройки на состояние активного профиля.
+    function applyProfileSnapshot(d) {
+        if (!d) return;
+        if (d.profiles) renderProfiles(d.profiles);
+        if (Array.isArray(d.messages)) {
+            items = d.messages.slice();
+            render();
+        }
+        if (d.memory) renderMemory(d.memory, null, true);
+        if (d.branches) renderBranches(d.branches);
+        if (d.compact) applyCompactFromServer(d.compact);
+        if (d.strategy) applyStrategyFromServer(d.strategy);
+        if (d.context) applyContextStats(d.context);
+    }
+
+    function profileAction(payload) {
+        fetch("/api/profiles", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+            if (!d || !d.ok) {
+                setStatus((d && d.error) || "Не удалось выполнить действие.",
+                          "error");
+                return;
+            }
+            applyProfileSnapshot(d);
+            var act = payload.action;
+            if (act === "create") setStatus("Профиль создан.", "ok");
+            else if (act === "switch") setStatus("Профиль переключён.", "ok");
+            else if (act === "update") setStatus("Профиль обновлён.", "ok");
+            else if (act === "delete") setStatus("Профиль удалён.", "ok");
+        })
+        .catch(function () { setStatus("Ошибка связи с профилями.", "error"); });
+    }
+
+    if (profileCreateBtn) {
+        profileCreateBtn.addEventListener("click", function () {
+            var name = profileNameInp ? profileNameInp.value.trim() : "";
+            if (!name) { setStatus("Введите имя профиля.", "error"); return; }
+            profileAction({
+                action: "create",
+                name: name,
+                character: profileCharInp ? profileCharInp.value.trim() : "",
+                style: profileStyleInp ? profileStyleInp.value.trim() : "",
+            });
+            if (profileNameInp) profileNameInp.value = "";
+            if (profileCharInp) profileCharInp.value = "";
+            if (profileStyleInp) profileStyleInp.value = "";
+        });
+    }
+
+    // ------------------------------------------------------------------
     // Отправка запроса
     // ------------------------------------------------------------------
     function ask() {
@@ -995,6 +1143,7 @@
                     // Применяем настройки сжатия и стратегии с сервера
                     applyCompactFromServer(d.compact);
                     applyStrategyFromServer(d.strategy);
+                    if (d.profiles) renderProfiles(d.profiles);
                     renderMemory(d.memory);
                     renderFacts(d.facts);
                     renderBranches(d.branches);
@@ -1074,6 +1223,7 @@
     resetContextStats();
     // Показываем панели facts/веток согласно активной стратегии.
     syncStrategyUI();
+    renderProfiles({ profiles: [], active: null });
     renderFacts({});
     renderBranches({ branches: [{ name: "main", size: 0 }], active_branch: 0 });
     renderMemory({ short: { items: 0, branches: 1 },

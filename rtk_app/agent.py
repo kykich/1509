@@ -161,7 +161,7 @@ class Agent:
         return chosen
 
     def answer(self, question, history=None, selected=None, max_tokens=None,
-               compact=None, memory=None):
+               compact=None, memory=None, profile=None):
         """Обрабатывает запрос пользователя и возвращает результат.
 
         Принимает:
@@ -179,6 +179,10 @@ class Agent:
                       данные памяти агента; фрагменты ответа, совпадающие с
                       ними, подсвечиваются цветом (рабочая — фисташковым,
                       долговременная — фуксией).
+            profile — dict {"name", "character", "style"} или None: характер
+                      (тон) и характер ответов (формат/длина) активного
+                      профиля пользователя. Подставляются в системный промпт,
+                      так что меняют поведение КАЖДОЙ модели.
         Возвращает dict, единообразный для успеха и ошибок:
             ok      — True, если хотя бы одна модель ответила;
             text    — текстовое представление ответов;
@@ -222,11 +226,16 @@ class Agent:
                           "title": "Агент: контекст уже сжат (summary + последние)",
                           "detail": "сжатие применено на сервере, повторно не выполняется"})
 
-        messages = self._build_messages(history, question)
+        messages = self._build_messages(history, question, profile=profile)
         hlen = len(history) if isinstance(history, list) else 0
+        prof_note = ""
+        if isinstance(profile, dict) and (profile.get("character")
+                                          or profile.get("style")):
+            prof_note = " | профиль: %s" % (profile.get("name") or "без имени")
         trace.append({"kind": "act", "title": "Агент собрал сообщения для API",
                       "detail": "%d сообщений (%d из истории + текущий) | системный "
-                                "промпт добавлен" % (len(messages), hlen)})
+                                "промпт добавлен%s" % (len(messages), hlen,
+                                                       prof_note)})
         print("[TRACE] Agent.answer() собрал %d сообщений для API" % len(messages),
               flush=True)
 
@@ -334,7 +343,36 @@ class Agent:
         summary_msg = {"role": "system", "content": compact["summary"]}
         return [summary_msg] + recent
 
-    def _build_messages(self, history, question):
+    @staticmethod
+    def profile_system_prompt(profile):
+        """Собирает системную инструкцию из профиля (характер + стиль).
+
+        profile — dict {"name", "character", "style"} или None. Возвращает
+        строку-инструкцию либо "" (пустую строку), если задавать нечего.
+
+        ХАРАКТЕР (character) задаёт ТОН общения (например, «дружелюбный»),
+        а ХАРАКТЕР ОТВЕТОВ (style) — ФОРМАТ и ДЛИНУ (например, «кратко,
+        по пунктам»). Инструкция подставляется в системный промпт, поэтому
+        применяется к каждой модели одинаково.
+        """
+        if not isinstance(profile, dict):
+            return ""
+        character = str(profile.get("character") or "").strip()
+        style = str(profile.get("style") or "").strip()
+        name = str(profile.get("name") or "").strip()
+        parts = []
+        if character:
+            parts.append("Характер общения (тон): %s." % character)
+        if style:
+            parts.append("Характер ответов (формат и длина): %s." % style)
+        if not parts:
+            return ""
+        head = "Персона, от лица которой ты отвечаешь"
+        if name:
+            head += " («%s»)" % name
+        return head + ": " + " ".join(parts)
+
+    def _build_messages(self, history, question, profile=None):
         """Собирает полный список сообщений для API (системный промпт + диалог).
 
         ВАЖНО: из истории сохраняются НЕ только user/assistant, но и
@@ -342,13 +380,17 @@ class Agent:
         отбрасывались, из-за чего модель НЕ получала память (рабочую и
         долговременную) и summary — будто памяти не существует.
 
-        Все системные сообщения (промпт агента + память + summary)
+        Все системные сообщения (промпт агента + память + summary + профиль)
         ОБЪЕДИНЯЮТСЯ в ОДНО ведущее system-сообщение: не все провайдеры
         корректно принимают несколько system-сообщений, а GigaChat ожидает
         системную инструкцию в начале. Диалог (user/assistant) идёт далее
         в исходном порядке, затем — текущий вопрос пользователя.
         """
         system_parts = [SYSTEM_PROMPT]
+        # Характер/стиль профиля (персоны) — задают тон и формат ответов.
+        prof_prompt = self.profile_system_prompt(profile)
+        if prof_prompt:
+            system_parts.append(prof_prompt)
         dialog = []
         if isinstance(history, list):
             for m in history:
