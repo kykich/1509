@@ -659,6 +659,10 @@
     var modelStats = {};
     // Порядок отображения моделей (метки из /api/model).
     var availableLabels = [];
+    // Метки моделей для выпадающего списка персоны (по умолчанию — те же,
+    // что и доступные модели). Объявлено здесь, т.к. используется в
+    // fillProfileModelSelect/renderProfiles и обработчиках профилей.
+    var availableModelLabels = [];
 
     function ensureModel(label) {
         if (!label) return null;
@@ -947,7 +951,21 @@
     // Рисует строки профилей: имя, характер/стиль и кнопки действий.
     function renderProfiles(state) {
         if (!profilesBox) return;
-        if (state && Array.isArray(state.profiles)) profilesState = state;
+        // Сервер возвращает профили в ДВУХ формах:
+        //   * объект {profiles:[...], active:"id"}  — из GET /api/session;
+        //   * массив [...] + отдельный ключ active  — из POST /api/profiles.
+        // Нормализуем обе формы к виду {profiles:[...], active:"id"}.
+        if (Array.isArray(state)) {
+            // Плоский массив профилей. Активный определим по полю p.active.
+            var act = null;
+            state.forEach(function (p) { if (p && p.active) act = p.id; });
+            profilesState = { profiles: state, active: act };
+        } else if (state && Array.isArray(state.profiles)) {
+            profilesState = {
+                profiles: state.profiles,
+                active: (state.active !== undefined ? state.active : null)
+            };
+        }
         var list = profilesState.profiles || [];
         profilesBox.innerHTML = "";
         if (!list.length) {
