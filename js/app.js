@@ -132,12 +132,13 @@
     function buildModelControls(available) {
         if (!modelBox) return;
         modelBox.innerHTML = "";
+        // По умолчанию модели ВЫКЛЮЧЕНЫ: пользователь сам включает нужные.
         modelState = available.map(function (m) {
-            return { label: m.label, cls: m.cls || "", on: true, temp: DEFAULT_TEMP };
+            return { label: m.label, cls: m.cls || "", on: false, temp: DEFAULT_TEMP };
         });
         modelState.forEach(function (st) {
             var wrap = document.createElement("div");
-            wrap.className = "model-ctrl active";
+            wrap.className = "model-ctrl inactive";
             wrap.dataset.label = st.label;
 
             // кнопка с названием модели
@@ -919,12 +920,30 @@
     // профиля заменяет активную память и диалог (сервер возвращает их снимок).
     var profilesBox = document.getElementById("profiles-box");
     var profileNameInp = document.getElementById("profile-name");
+    var profileModelSel = document.getElementById("profile-model");
     var profileCharInp = document.getElementById("profile-character");
     var profileStyleInp = document.getElementById("profile-style");
     var profileCreateBtn = document.getElementById("profile-create");
     // Текущий список профилей и id активного (снимок сервера).
     var profilesState = { profiles: [], active: null };
 
+    // Заполняет выпадающий список моделей в форме создания персоны.
+    function fillProfileModelSelect(labels) {
+        if (!profileModelSel) return;
+        if (Array.isArray(labels) && labels.length) availableModelLabels = labels.slice();
+        profileModelSel.innerHTML = "";
+        // Пустой вариант — «модель по выбору сверху» (если у персоны не задана).
+        var none = document.createElement("option");
+        none.value = "";
+        none.textContent = "модель: по выбору сверху";
+        profileModelSel.appendChild(none);
+        availableModelLabels.forEach(function (l) {
+            var o = document.createElement("option");
+            o.value = l;
+            o.textContent = l;
+            profileModelSel.appendChild(o);
+        });
+    }
     // Рисует строки профилей: имя, характер/стиль и кнопки действий.
     function renderProfiles(state) {
         if (!profilesBox) return;
@@ -934,8 +953,10 @@
         if (!list.length) {
             var empty = document.createElement("div");
             empty.className = "profiles-empty";
-            empty.textContent = "профилей пока нет";
+            empty.textContent = "Профилей пока нет. Создайте профиль ниже — " +
+                "он задаёт системный промпт для ответа.";
             profilesBox.appendChild(empty);
+            updateModelBarMode();
             return;
         }
         list.forEach(function (p) {
@@ -951,6 +972,7 @@
             var meta = document.createElement("span");
             meta.className = "p-meta";
             var bits = [];
+            if (p.model) bits.push("модель: " + p.model);
             if (p.character) bits.push(p.character);
             if (p.style) bits.push(p.style);
             meta.textContent = bits.join(" · ") || "без характера";
@@ -969,29 +991,31 @@
                 e.stopPropagation();
                 var newName = window.prompt("Имя профиля:", p.name || "");
                 if (newName === null) return;
+                var newModel = window.prompt("Модель персоны (" +
+                    availableModelLabels.join(" / ") + "):", p.model || "");
+                if (newModel === null) return;
                 var newChar = window.prompt("Характер (тон):", p.character || "");
                 if (newChar === null) return;
                 var newStyle = window.prompt("Характер ответов (формат/длина):",
                                              p.style || "");
                 if (newStyle === null) return;
                 profileAction({ action: "update", id: p.id, name: newName,
-                                character: newChar, style: newStyle });
+                                model: newModel, character: newChar, style: newStyle });
             });
             row.appendChild(ren);
 
-            // Удаление доступно, только если профилей больше одного.
-            if (list.length > 1) {
-                var del = document.createElement("button");
-                del.type = "button"; del.className = "p-del"; del.textContent = "\u00d7";
-                del.title = "Удалить профиль";
-                del.addEventListener("click", function (e) {
-                    e.stopPropagation();
-                    if (!window.confirm("Удалить профиль «" + (p.name || "") +
-                                        "» вместе с его памятью и диалогом?")) return;
-                    profileAction({ action: "delete", id: p.id });
-                });
-                row.appendChild(del);
-            }
+            // Удаление доступно всегда — можно удалить и последний профиль
+            // (тогда профилей снова не будет, как по умолчанию).
+            var del = document.createElement("button");
+            del.type = "button"; del.className = "p-del"; del.textContent = "\u00d7";
+            del.title = "Удалить профиль";
+            del.addEventListener("click", function (e) {
+                e.stopPropagation();
+                if (!window.confirm("Удалить профиль «" + (p.name || "") +
+                                    "» вместе с его памятью и диалогом?")) return;
+                profileAction({ action: "delete", id: p.id });
+            });
+            row.appendChild(del);
 
             row.addEventListener("click", function () {
                 if (p.active) return;
@@ -999,6 +1023,7 @@
             });
             profilesBox.appendChild(row);
         });
+        updateModelBarMode();
     }
 
     // Применяет снимок, пришедший от сервера после действий с профилями:
@@ -1047,6 +1072,7 @@
             profileAction({
                 action: "create",
                 name: name,
+                model: profileModelSel ? profileModelSel.value : "",
                 character: profileCharInp ? profileCharInp.value.trim() : "",
                 style: profileStyleInp ? profileStyleInp.value.trim() : "",
             });
@@ -1056,12 +1082,47 @@
         });
     }
 
+    // Вкл/выкл панели выбора моделей сверху.
+    // Если есть активная персона — выбор моделей недоступен
+    // (отвечает персона своей моделью); если персон нет — режим
+    // «напрямую с моделями», выбор доступен.
+    function updateModelBarMode() {
+        if (!modelBox) return;
+        var locked = hasActiveProfile();
+        modelBox.classList.toggle("locked", locked);
+        var hint = document.querySelector(".model-bar-hint");
+        if (hint) {
+            hint.textContent = locked
+                ? "Отвечает персона — её модель задана в персоне (выбор моделей недоступен)."
+                : "Выберите модели для запроса (можно несколько) и температуру каждой:";
+        }
+    }
+
     // ------------------------------------------------------------------
     // Отправка запроса
     // ------------------------------------------------------------------
+    // Активен ли хотя бы один профиль (без профиля отвечать нельзя).
+    function hasActiveProfile() {
+        return !!(profilesState && profilesState.active);
+    }
+
+    // Включена ли хотя бы одна модель.
+    function hasSelectedModel() {
+        return modelState.some(function (m) { return m.on; });
+    }
+
     function ask() {
         var question = qEl.value.trim();
         if (!question || busy) { if (!question) setStatus("Введите запрос.", "error"); return; }
+
+        // ДВА РЕЖИМА:
+        //   * есть активная персона — отвечает она СВОЕЙ моделью,
+        //     выбор моделей сверху недоступен;
+        //   * персон нет — диалог идёт напрямую с выбранными моделями.
+        if (!hasActiveProfile() && !hasSelectedModel()) {
+            setStatus("Выберите модель или создайте персону.", "error");
+            return;
+        }
 
         busy = true;
         submit.disabled = true;
@@ -1213,6 +1274,7 @@
                     return { label: l, cls: "" };
                 }));
             }
+            fillProfileModelSelect(availableLabels);
             renderModelStats();
         })
         .catch(function () {});

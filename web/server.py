@@ -34,9 +34,12 @@ JSON-API:
                               -> ветки (rename: {index, name})
     GET  /api/profiles      - список профилей (персон) + активный
     POST /api/profiles      - {action:"create"|"switch"|"update"|"delete", …}
-                              -> профили (персоны): character (характер/тон)
-                              и style (характер ответов) задаются при создании
-"""
+                              -> профили (персоны): при создании задаются
+                              name, model (модель персоны), character
+                              (характер/тон) и style (характер ответов).
+                              Ответы даёт АКТИВНАЯ персона своей моделью;
+                              при отсутствии персон диалог идёт с моделями.
+    """
 import json
 import mimetypes
 import os
@@ -234,6 +237,35 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(selected, list) or not selected:
             selected = None
 
+        # РЕЖИМ ОТВЕТА зависит от наличия персон:
+        #   * ЕСТЬ активная персона — отвечает ПЕРСОНА, используя СВОЮ модель
+        #     (выбор моделей сверху недоступен, но если клиент всё же прислал
+        #     список — модель персоны имеет приоритет);
+        #   * НЕТ персон — диалог идёт напрямую с ВЫБРАННЫМИ моделями.
+        pid, pname, pmodel, pchar, pstyle = self.session.active_profile_attrs()
+        if pid:
+            # Отвечает персона. Заголовок блока — имя персоны.
+            answer_title = pname or "Персона"
+            profile = {"name": pname, "character": pchar, "style": pstyle}
+            # Модель персоны имеет приоритет; если у персоны модель не задана —
+            # используем выбранные сверху модели, а если и их нет — все
+            # доступные модели агента (передаём None).
+            if pmodel:
+                selected = [{"label": pmodel}]
+            elif selected is None:
+                selected = None  # агент опросит все доступные модели
+        else:
+            # Персон нет — режим «напрямую с моделями».
+            answer_title = None
+            profile = None
+            if selected is None:
+                return self._send_json(200, {
+                    "ok": False,
+                    "error": "Не выбрана ни одна модель. Включите модель для "
+                             "запроса.",
+                    "text": "", "html": "", "answers": [],
+                })
+
         # Глобальное ограничение max_tokens (None — не применяется)
         max_tokens = data.get("max_tokens")
         try:
@@ -276,14 +308,14 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 
         # Профиль (персона): характер и характер ответов активного профиля
         # подставляются в системный промпт каждой модели (тон + формат/длина).
-        pid, pname, pchar, pstyle = self.session.active_profile_attrs()
-        profile = {"name": pname, "character": pchar, "style": pstyle}
+        # pid/pname/... и profile уже получены выше (см. выбор режима).
 
         result = self.agent.answer(question, history, selected,
                                    max_tokens=max_tokens,
                                    compact=compact,
                                    memory=memory,
-                                   profile=profile)
+                                   profile=profile,
+                                   answer_title=answer_title)
         if result.get("ok"):
             # По одному ходу на ответ модели с уже готовой разметкой
             self.session.append_turn(question, {
@@ -550,8 +582,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         модели. Переключение профиля заменяет активную память и диалог.
 
         Ожидаемые поля: action = "create" | "switch" | "update" | "delete";
-        id (для switch/update/delete); name, character, style (для
-        create/update).
+        id (для switch/update/delete); name, character, style, model (для
+        create/update). model — метка модели, которой отвечает персона.
         """
         data = self._read_json_body()
         if not data:
@@ -563,6 +595,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     data.get("name"),
                     character=data.get("character"),
                     style=data.get("style"),
+                    model=data.get("model"),
                     activate=bool(data.get("activate", True)))
             elif action == "switch":
                 state = self.session.switch_profile(data.get("id"))
@@ -571,7 +604,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     data.get("id"),
                     name=data.get("name"),
                     character=data.get("character"),
-                    style=data.get("style"))
+                    style=data.get("style"),
+                    model=data.get("model"))
             elif action == "delete":
                 state = self.session.delete_profile(data.get("id"))
             elif action in ("list", "state", ""):

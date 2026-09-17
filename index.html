@@ -49,18 +49,20 @@
                  активную память и диалог. -->
             <div class="side-title side-sub">Профили (персоны)</div>
             <div id="profiles-box" class="profiles-box">
-                <div class="profiles-empty">профилей пока нет</div>
+                <div class="profiles-empty">Профилей пока нет. Создайте профиль — он задаёт системный промпт для ответа.</div>
             </div>
             <div class="profiles-actions">
                 <input type="text" id="profile-name" class="gen-input profile-input"
                        placeholder="имя" maxlength="40">
+                <select id="profile-model" class="gen-input profile-input"
+                        title="Модель, которой будет отвечать персона"></select>
                 <input type="text" id="profile-character" class="gen-input profile-input"
                        placeholder="характер (тон)" maxlength="200">
                 <input type="text" id="profile-style" class="gen-input profile-input"
                        placeholder="характер ответов (формат)" maxlength="200">
                 <button id="profile-create" type="button" class="btn-side primary">Создать профиль</button>
             </div>
-            <span class="side-note">характер задаёт тон, характер ответов — формат и длину</span>
+            <span class="side-note">персона отвечает своей моделью; характер — тон, характер ответов — формат и длину</span>
 
             <!-- Summary: автоматическое сжатие истории (без кнопки).
                  Summary генерируется само после накопления указанного

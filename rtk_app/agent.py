@@ -161,7 +161,7 @@ class Agent:
         return chosen
 
     def answer(self, question, history=None, selected=None, max_tokens=None,
-               compact=None, memory=None, profile=None):
+               compact=None, memory=None, profile=None, answer_title=None):
         """Обрабатывает запрос пользователя и возвращает результат.
 
         Принимает:
@@ -183,6 +183,9 @@ class Agent:
                       (тон) и характер ответов (формат/длина) активного
                       профиля пользователя. Подставляются в системный промпт,
                       так что меняют поведение КАЖДОЙ модели.
+            answer_title — строка-заголовок блока ответа. Если задана (ответ
+                      даёт персона) — в шапке карточки показывается имя
+                      персоны, а не метка модели.
         Возвращает dict, единообразный для успеха и ошибок:
             ok      — True, если хотя бы одна модель ответила;
             text    — текстовое представление ответов;
@@ -282,13 +285,16 @@ class Agent:
             if single["ok"]:
                 ok_any = True
             block_html, mem_counts = self._render_block(
-                provider, model, label, cls, single, memory)
+                provider, model, label, cls, single, memory,
+                title=answer_title)
             blocks.append(block_html)
             memory_used["working"] += mem_counts["working"]
             memory_used["longterm"] += mem_counts["longterm"]
-            text_parts.append(self._render_text(provider, model, label, single))
+            text_parts.append(self._render_text(provider, model, label, single,
+                                                title=answer_title))
             collected.append({
-                "label": label,
+                "label": answer_title or label,
+                "model": label,
                 "text": single["content"],
                 "temperature": temperature,
                 "input": single["prompt_tokens"],
@@ -478,12 +484,13 @@ class Agent:
                 "error": str(exc),
             }
 
-    def _render_block(self, provider, model, label, cls, single, memory=None):
+    def _render_block(self, provider, model, label, cls, single, memory=None,
+                      title=None):
         """HTML-блок (карточка ответа одной модели) и счётчики памяти.
 
-        В заголовке карточки показываем ТОЛЬКО название модели — время,
-        токены и стоимость в шапке ответа не выводим (метрики остаются в
-        текстовом представлении и статистике сессии).
+        В заголовке карточки показываем title (имя персоны, если ответ даёт
+        персона) либо метку модели. Время, токены и стоимость в шапке ответа
+        не выводим (метрики остаются в текстовом представлении и статистике).
 
         Фрагменты ответа, совпадающие с данными памяти агента (memory),
         подсвечиваются: рабочая — фисташковым, долговременная — фуксией.
@@ -504,17 +511,18 @@ class Agent:
             "<span class='variant-name'>%s</span>"
             "</div>"
             "<div class='variant-body'>%s</div></div>"
-            % (cls, label, frag)
+            % (cls, title or label, frag)
         )
         return block, counts
 
-    def _render_text(self, provider, model, label, single):
+    def _render_text(self, provider, model, label, single, title=None):
         """Текстовая строка-представление ответа одной модели.
 
-        Показываем ТОЛЬКО название модели и её ответ — без времени, токенов
-        и стоимости (метрики остаются в статистике сессии и служебных логах).
+        Показываем title (имя персоны) либо метку модели и её ответ — без
+        времени, токенов и стоимости (метрики остаются в статистике сессии
+        и служебных логах).
         """
-        return "%s:\n%s" % (label, single["content"])
+        return "%s:\n%s" % (title or label, single["content"])
 
     def _build_meta(self, ts, total_tokens, ok_any):
         """Служебная строка с информацией о генерации."""

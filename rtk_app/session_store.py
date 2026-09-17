@@ -119,11 +119,16 @@ class SessionStore:
     # self.messages/memory_*/… отражают ТЕКУЩИЙ (активный) профиль.
 
     @staticmethod
-    def _new_profile_dict(pid, name, character="", style=""):
-        """Создаёт словарь нового пустого профиля."""
+    def _new_profile_dict(pid, name, character="", style="", model=""):
+        """Создаёт словарь нового пустого профиля.
+
+        model — метка модели (например, "GigaChat"), с которой работает
+        персона: ответы персоны генерирует именно эта модель.
+        """
         return {
             "id": str(pid),
             "name": str(name or "Профиль")[: int(config.PROFILE_NAME_CAP)],
+            "model": str(model or "")[: int(config.PROFILE_NAME_CAP)],
             "character": str(character or "")[: int(config.PROFILE_ATTR_CAP)],
             "style": str(style or "")[: int(config.PROFILE_ATTR_CAP)],
             # Память профиля (изолирована от других профилей).
@@ -203,14 +208,31 @@ class SessionStore:
             "working": int((mcount or {}).get("working", 0) or 0),
             "longterm": int((mcount or {}).get("longterm", 0) or 0)}
 
+    def _reset_active_state_locked(self):
+        """Сбрасывает состояние активного профиля в «пусто» (профилей нет)."""
+        self.active_profile = None
+        self.messages = []
+        self.compact = self._default_compact()
+        self.strategy = config.STRATEGY
+        self.window = int(config.STRATEGY_WINDOW)
+        self.branches = [{"name": "main", "messages": []}]
+        self.active_branch = 0
+        self.memory_working = {}
+        self.memory_longterm = {}
+        self.memory_use = {"working": 0, "longterm": 0}
+        self.memory_use_count = {"working": 0, "longterm": 0}
+
     def _ensure_profile_locked(self):
-        """Гарантирует наличие хотя бы одного профиля и активной ссылки."""
-        if not self.profiles:
-            self.profiles = [self._new_profile_dict("default", "Профиль 1",
-                                                    "дружелюбный", "обычные")]
+        """Согласует ссылку на активный профиль со списком профилей.
+
+        ВАЖНО: по умолчанию профилей НЕТ (список пуст, active_profile=None).
+        Профиль создаётся пользователем явно (кнопкой «Создать профиль»).
+        Здесь мы лишь следим, чтобы active_profile указывал на существующий
+        профиль (или оставался None, если профилей нет).
+        """
         ids = [p["id"] for p in self.profiles]
         if self.active_profile not in ids:
-            self.active_profile = self.profiles[0]["id"]
+            self.active_profile = ids[0] if ids else None
 
     def _profile_by_id_locked(self, pid):
         for p in self.profiles:
@@ -222,7 +244,7 @@ class SessionStore:
         """Снимок профилей для интерфейса.
 
         Возвращает dict:
-          profiles — список {id, name, character, style, active, size};
+          profiles — список {id, name, model, character, style, active, size};
           active   — id активного профиля.
         """
         with self.lock:
@@ -232,6 +254,7 @@ class SessionStore:
                 out.append({
                     "id": p["id"],
                     "name": p["name"],
+                    "model": p.get("model", ""),
                     "character": p.get("character", ""),
                     "style": p.get("style", ""),
                     "active": p["id"] == self.active_profile,
@@ -239,11 +262,13 @@ class SessionStore:
                 })
             return {"profiles": out, "active": self.active_profile}
 
-    def create_profile(self, name, character="", style="", activate=True):
+    def create_profile(self, name, character="", style="", model="",
+                       activate=True):
         """Создаёт новый профиль (со своей пустой памятью) и сохраняет.
 
-        name, character, style задаются при создании. Если activate=True —
-        новый профиль становится активным (память переключается на него).
+        name, character, style, model задаются при создании. model — метка
+        модели, которой будет отвечать персона. Если activate=True — новый
+        профиль становится активным (память/диалог переключаются на него).
         """
         with self.lock:
             self._ensure_profile_locked()
@@ -260,7 +285,7 @@ class SessionStore:
             while pid in existing:
                 n += 1
                 pid = "p%d" % n
-            prof = self._new_profile_dict(pid, name, character, style)
+            prof = self._new_profile_dict(pid, name, character, style, model)
             # Новый профиль наследует текущую стратегию/сжатие (но не память).
             prof["strategy"] = self.strategy
             prof["window"] = self.window
@@ -271,8 +296,9 @@ class SessionStore:
             self._save_locked()
             return self.profiles_state()
 
-    def update_profile(self, pid, name=None, character=None, style=None):
-        """Обновляет имя/характер/стиль профиля (память не трогает)."""
+    def update_profile(self, pid, name=None, character=None, style=None,
+                       model=None):
+        """Обновляет имя/характер/стиль/модель профиля (память не трогает)."""
         with self.lock:
             p = self._profile_by_id_locked(pid)
             if p is None:
@@ -282,6 +308,8 @@ class SessionStore:
                 if not nm:
                     raise ValueError("Пустое имя профиля.")
                 p["name"] = nm[: int(config.PROFILE_NAME_CAP)]
+            if model is not None:
+                p["model"] = str(model)[: int(config.PROFILE_NAME_CAP)]
             if character is not None:
                 p["character"] = str(character)[: int(config.PROFILE_ATTR_CAP)]
             if style is not None:
@@ -290,18 +318,19 @@ class SessionStore:
             return self.profiles_state()
 
     def delete_profile(self, pid):
-        """Удаляет профиль (нельзя удалить последний)."""
+        """Удаляет профиль. Удалить можно и последний — тогда профилей снова нет."""
         with self.lock:
-            self._ensure_profile_locked()
-            if len(self.profiles) <= 1:
-                raise ValueError("Нельзя удалить последний профиль.")
             p = self._profile_by_id_locked(pid)
             if p is None:
                 return self.profiles_state()
             self.profiles = [x for x in self.profiles if x["id"] != pid]
-            if self.active_profile == pid:
-                # Переключаемся на первый оставшийся профиль.
-                self._apply_locked(self.profiles[0])
+            if self.active_profile == pid or not self.profiles:
+                # Активным становится первый оставшийся, либо профиля нет.
+                if self.profiles:
+                    self._apply_locked(self.profiles[0])
+                else:
+                    self.active_profile = None
+                    self._reset_active_state_locked()
             self._save_locked()
             return self.profiles_state()
 
@@ -318,22 +347,24 @@ class SessionStore:
             return self.profiles_state()
 
     def active_profile_attrs(self):
-        """Возвращает (id, name, character, style) активного профиля."""
+        """Возвращает (id, name, model, character, style) активного профиля."""
         with self.lock:
             self._ensure_profile_locked()
             p = self._profile_by_id_locked(self.active_profile)
             if p is None:
-                return (None, "", "", "")
-            return (p["id"], p["name"], p.get("character", ""),
-                    p.get("style", ""))
+                return (None, "", "", "", "")
+            return (p["id"], p["name"], p.get("model", ""),
+                    p.get("character", ""), p.get("style", ""))
 
     # ---- чтение ----
     def load(self):
         """Читает сохранённые профили и сессию из файлов.
 
         Основной источник — profiles.json (список профилей + активный).
-        Если его нет, но есть старый session.json — мигрируем: создаём один
-        профиль «Профиль 1», перенося в него всю сохранённую память/диалог.
+        ВАЖНО: по умолчанию профилей НЕТ — пользователь создаёт их сам.
+        Легаси-сессию (session.json) подхватываем ТОЛЬКО если профилей ещё
+        не было и в файле есть реальная история: тогда создаём один профиль
+        и переносим в него сохранённую память/диалог (миграция).
         """
         with self.lock:
             self.messages = []
@@ -346,24 +377,37 @@ class SessionStore:
             self.memory_longterm = {}
             self.memory_use = {"working": 0, "longterm": 0}
             self.memory_use_count = {"working": 0, "longterm": 0}
+            self.profiles = []
+            self.active_profile = None
             # Сначала пробуем загрузить профили.
             if self._load_profiles_locked():
                 return
-            # Профилей нет — читаем старую одиночную сессию (если есть) и
-            # переносим её содержимое в один профиль.
+            # Профилей нет — читаем старую одиночную сессию (если есть) и,
+            # ТОЛЬКО если в ней реально что-то сохранено, переносим её в
+            # один профиль (миграция). Пустой файл профиля не создаёт.
+            self._legacy_profile_attrs = {}
             if self.path and os.path.isfile(self.path):
                 self._load_legacy_session_locked()
-            # Гарантируем наличие хотя бы одного профиля и запоминаем его
-            # как активный источник состояния.
-            legacy_attrs = self._legacy_profile_attrs
-            self.profiles = [self._new_profile_dict(
-                "default",
-                legacy_attrs.get("name", "Профиль 1"),
-                legacy_attrs.get("character", "дружелюбный"),
-                legacy_attrs.get("style", "обычные"))]
-            self.active_profile = "default"
-            # Переносим загруженное (из старой сессии) в профиль.
-            self._capture_locked()
+            if self._legacy_has_content():
+                legacy_attrs = self._legacy_profile_attrs
+                self.profiles = [self._new_profile_dict(
+                    "default",
+                    legacy_attrs.get("name", "Профиль 1"),
+                    legacy_attrs.get("character", ""),
+                    legacy_attrs.get("style", ""))]
+                self.active_profile = "default"
+                # Переносим загруженное (из старой сессии) в профиль.
+                self._capture_locked()
+
+    def _legacy_has_content(self):
+        """Есть ли в загруженной легаси-сессии реальные данные для миграции."""
+        if self.messages:
+            return True
+        if self.memory_working or self.memory_longterm:
+            return True
+        if self.compact.get("summary"):
+            return True
+        return False
 
     def _load_profiles_locked(self):
         """Загружает profiles.json в self.profiles и активирует сохранённый.
@@ -390,7 +434,8 @@ class SessionStore:
                 continue
             prof = self._new_profile_dict(
                 pid, p.get("name", "Профиль"),
-                p.get("character", ""), p.get("style", ""))
+                p.get("character", ""), p.get("style", ""),
+                p.get("model", ""))
             # Память.
             mw = p.get("memory_working")
             if isinstance(mw, dict):

@@ -1040,4 +1040,19 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
 }
 .profiles-actions .btn-side:hover { background: var(--accent-dark); }
 
+/* Выпадающий список модели персоны (тёмная тема левой колонки). */
+.profiles-actions select.profile-input {
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+}
+
+/* Режим выбора моделей, когда отвечает персона: выбор сверху недоступен. */
+.model-list.locked {
+    opacity: .5;
+    pointer-events: none;
+    filter: grayscale(.35);
+}
+
+
 

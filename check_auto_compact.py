@@ -41,10 +41,11 @@ class FakeAgent:
         self.compacted = []       # куски, ушедшие в compact_update()
 
     def available(self):
-        return []
+        return [{"label": "Fake", "cls": ""}]
 
     def answer(self, question, history=None, selected=None,
-               max_tokens=None, compact=None, memory=None, profile=None):
+               max_tokens=None, compact=None, memory=None, profile=None,
+               answer_title=None):
         self.sent.append(list(history or []))
         return {"ok": True, "html": "", "text": "ok", "answers": [],
                 "meta": "", "usage": {"input": 1, "output": 1,
@@ -89,10 +90,16 @@ def main():
     turns = keep // 2 + 1
 
     try:
+        # По умолчанию профилей НЕТ — без профиля сервер отказывает в ответе.
+        # Создаём профиль, чтобы запросы /api/ask обрабатывались.
+        post("/api/profiles", {"action": "create", "name": "Тест",
+                               "character": "дружелюбный", "style": "кратко"})
+
         print("=== клиент НЕ вызывает /api/compact_summary (только /api/ask) ===")
         for i in range(turns):
             post("/api/ask", {"question": "q%d" % i,
-                              "models": None, "max_tokens": None})
+                              "models": [{"label": "Fake", "temperature": 0.7}],
+                              "max_tokens": None})
         # Ни одного ручного вызова сжатия:
         check("ручных вызовов generate не было (кнопки нет)",
               True)
@@ -109,7 +116,8 @@ def main():
 
         print()
         print("=== следующий запрос идёт с summary, а не с полной историей ===")
-        post("/api/ask", {"question": "ещё", "models": None,
+        post("/api/ask", {"question": "ещё",
+                          "models": [{"label": "Fake", "temperature": 0.7}],
                           "max_tokens": None})
         sent = fake.sent[-1]
         check("первый элемент — system-summary",
